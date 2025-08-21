@@ -1,0 +1,1191 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Personal Growth Dashboard</title>
+    <meta name="theme-color" content="#0f172a" />
+    <!-- Tailwind (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = { darkMode: "class" };
+    </script>
+    <!-- React + ReactDOM (production UMD) -->
+    <script
+      crossorigin
+      src="https://unpkg.com/react@18/umd/react.production.min.js"
+    ></script>
+    <script
+      crossorigin
+      src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"
+    ></script>
+    <!-- Recharts UMD -->
+    <script
+      crossorigin
+      src="https://unpkg.com/recharts/umd/Recharts.min.js"
+    ></script>
+    <!-- jsPDF for PDF export -->
+    <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+    <!-- Firebase v10+ (modular) via CDN -->
+    <script type="module">
+      /* lazy placeholder to ensure module scope for firebase below */
+    </script>
+    <style>
+      html,
+      body {
+        height: 100%;
+      }
+      .container-max {
+        max-width: 1200px;
+      }
+    </style>
+  </head>
+  <body
+    class="h-full bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100"
+  >
+    <div id="root" class="h-full"></div>
+
+    <script type="module">
+      // ====== Imports (ESM via CDN) ======
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
+      import {
+        getAuth,
+        onAuthStateChanged,
+        signInWithEmailAndPassword,
+        createUserWithEmailAndPassword,
+        signOut,
+      } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
+      import {
+        getFirestore,
+        doc,
+        getDoc,
+        setDoc,
+        updateDoc,
+        onSnapshot,
+        serverTimestamp,
+      } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
+
+      const { useState, useEffect, useMemo, useRef } = React;
+      const {
+        LineChart,
+        Line,
+        XAxis,
+        YAxis,
+        Tooltip,
+        Legend,
+        ResponsiveContainer,
+        CartesianGrid,
+      } = Recharts;
+
+      // ====== Firebase Config (REPLACE with your keys) ======
+      const firebaseConfig = {
+        apiKey: "YOUR_API_KEY",
+        authDomain: "YOUR_AUTH_DOMAIN",
+        projectId: "YOUR_PROJECT_ID",
+        storageBucket: "YOUR_STORAGE_BUCKET",
+        messagingSenderId: "YOUR_SENDER_ID",
+        appId: "YOUR_APP_ID",
+      };
+      // Initialize
+      const app = initializeApp(firebaseConfig);
+      const auth = getAuth(app);
+      const db = getFirestore(app);
+
+      // ====== Utilities ======
+      const fmtDate = (d) => new Date(d).toISOString().slice(0, 10);
+      const todayStr = () => fmtDate(new Date());
+      const number = (v) => Number(v || 0);
+
+      // localStorage helpers for theme
+      const loadLS = (k, f) => {
+        try {
+          const r = localStorage.getItem(k);
+          return r ? JSON.parse(r) : f;
+        } catch {
+          return f;
+        }
+      };
+      const saveLS = (k, v) => {
+        try {
+          localStorage.setItem(k, JSON.stringify(v));
+        } catch {}
+      };
+
+      // ====== Simple SW + Manifest (PWA) ======
+      (function setupPWA() {
+        // dynamic manifest
+        const manifest = {
+          name: "Personal Growth Dashboard",
+          short_name: "PGD",
+          start_url: ".",
+          display: "standalone",
+          background_color: "#0f172a",
+          theme_color: "#0f172a",
+          icons: [
+            {
+              src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%230f172a'/><text x='50' y='58' font-size='56' text-anchor='middle' fill='white'>P</text></svg>",
+              sizes: "192x192",
+              type: "image/svg+xml",
+            },
+          ],
+        };
+        const blob = new Blob([JSON.stringify(manifest)], {
+          type: "application/json",
+        });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("link");
+        link.rel = "manifest";
+        link.href = url;
+        document.head.appendChild(link);
+
+        // service worker (cache shell)
+        if ("serviceWorker" in navigator) {
+          const swCode = `
+      const CACHE='pgd-cache-v1';
+      self.addEventListener('install', e=>{ e.waitUntil(caches.open(CACHE).then(c=>c.addAll(['./']))); });
+      self.addEventListener('fetch', e=>{ e.respondWith(
+        caches.match(e.request).then(r=> r || fetch(e.request).then(res=>{ return res; }))
+      ); });`;
+          const swBlob = new Blob([swCode], { type: "text/javascript" });
+          const swUrl = URL.createObjectURL(swBlob);
+          navigator.serviceWorker.register(swUrl);
+        }
+      })();
+
+      // ====== Firestore data shape per user ======
+      // doc: users/{uid}
+      // {
+      //   profile: { themeDark: boolean, lang: 'id-en' },
+      //   tasks: [ {id, text, date, important, done} ],
+      //   money: { 'YYYY-MM-DD': { pocket, extra } },
+      //   social: { 'YYYY-MM-DD': { tiktok, instagram, youtube } },
+      //   nofap: { start: 'YYYY-MM-DD', log: { 'YYYY-MM-DD': true } },
+      //   habits: { schema: [ {key, label, unit, weeklyTarget} ], log: { 'YYYY-MM-DD': { [key]: value } } }
+      // }
+
+      async function ensureUserDoc(uid) {
+        const ref = doc(db, "users", uid);
+        const snap = await getDoc(ref);
+        if (!snap.exists()) {
+          await setDoc(ref, {
+            createdAt: serverTimestamp(),
+            profile: { themeDark: true, lang: "id-en" },
+            tasks: [],
+            money: {},
+            social: {},
+            nofap: { start: "", log: {} },
+            habits: {
+              schema: [
+                {
+                  key: "exercise",
+                  label: "Olahraga",
+                  unit: "minutes",
+                  weeklyTarget: 150,
+                },
+                {
+                  key: "reading",
+                  label: "Membaca",
+                  unit: "minutes",
+                  weeklyTarget: 210,
+                },
+                {
+                  key: "sleep",
+                  label: "Tidur",
+                  unit: "hours",
+                  weeklyTarget: 49,
+                },
+              ],
+              log: {},
+            },
+          });
+        }
+      }
+
+      // ====== App ======
+      function App() {
+        const [user, setUser] = useState(null);
+        const [docData, setDocData] = useState(null);
+        const [loading, setLoading] = useState(true);
+        const [dark, setDark] = useState(loadLS("pgd_theme_dark", true));
+
+        useEffect(() => {
+          document.documentElement.classList.toggle("dark", dark);
+          saveLS("pgd_theme_dark", dark);
+        }, [dark]);
+
+        useEffect(() => {
+          const unsub = onAuthStateChanged(auth, async (u) => {
+            setUser(u);
+            if (u) {
+              await ensureUserDoc(u.uid);
+              const ref = doc(db, "users", u.uid);
+              const off = onSnapshot(ref, (snap) => {
+                setDocData(snap.data() || null);
+                setLoading(false);
+              });
+              return () => off();
+            } else {
+              setDocData(null);
+              setLoading(false);
+            }
+          });
+          return () => unsub();
+        }, []);
+
+        if (!user) return React.createElement(AuthView, { setDark });
+        if (loading || !docData) return h("div", "Loading...");
+        return React.createElement(Dashboard, { user, data: docData, setDark });
+      }
+
+      function AuthView({ setDark }) {
+        const [email, setEmail] = useState("");
+        const [password, setPassword] = useState("");
+        const [err, setErr] = useState("");
+        const [mode, setMode] = useState("login");
+
+        async function submit() {
+          try {
+            setErr("");
+            if (mode === "login")
+              await signInWithEmailAndPassword(auth, email, password);
+            else await createUserWithEmailAndPassword(auth, email, password);
+          } catch (e) {
+            setErr(e.message || "Auth error");
+          }
+        }
+        return h(
+          "div",
+          h(
+            "div",
+            { className: "container-max mx-auto p-6" },
+            h(
+              "div",
+              {
+                className:
+                  "max-w-md mx-auto rounded-2xl border border-slate-200 dark:border-slate-800 p-6 bg-white dark:bg-slate-900",
+              },
+              h(
+                "h1",
+                { className: "text-2xl font-bold mb-2" },
+                "Personal Growth Dashboard"
+              ),
+              h(
+                "p",
+                { className: "text-sm opacity-80 mb-4" },
+                "Minimalist – Black & White. PWA mobile & desktop."
+              ),
+              h(
+                "div",
+                { className: "mb-3" },
+                h("input", {
+                  className:
+                    "w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                  placeholder: "Email",
+                  value: email,
+                  onChange: (e) => setEmail(e.target.value),
+                })
+              ),
+              h(
+                "div",
+                { className: "mb-4" },
+                h("input", {
+                  type: "password",
+                  className:
+                    "w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                  placeholder: "Password",
+                  value: password,
+                  onChange: (e) => setPassword(e.target.value),
+                })
+              ),
+              err && h("div", { className: "text-red-500 text-sm mb-2" }, err),
+              h(
+                "div",
+                { className: "flex items-center gap-2 mb-4" },
+                h(
+                  "button",
+                  {
+                    onClick: submit,
+                    className:
+                      "px-3 py-2 rounded-xl bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900",
+                  },
+                  mode === "login" ? "Login" : "Create Account"
+                ),
+                h(
+                  "button",
+                  {
+                    onClick: () =>
+                      setMode(mode === "login" ? "signup" : "login"),
+                    className: "text-sm underline",
+                  },
+                  mode === "login"
+                    ? "Create new account"
+                    : "Already have account? Login"
+                )
+              ),
+              h(
+                "div",
+                { className: "flex items-center justify-between" },
+                h(
+                  "button",
+                  {
+                    onClick: () => setDark((d) => !d),
+                    className:
+                      "px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 text-sm",
+                  },
+                  "Toggle Light/Dark"
+                ),
+                h("div", { className: "text-xs opacity-70" }, "ID–EN UI labels")
+              )
+            )
+          )
+        );
+      }
+
+      function Dashboard({ user, data, setDark }) {
+        const ref = doc(db, "users", user.uid);
+        // local state mirrors
+        const [tasks, setTasks] = useState(data.tasks || []);
+        const [money, setMoney] = useState(data.money || {});
+        const [social, setSocial] = useState(data.social || {});
+        const [nofap, setNofap] = useState(
+          data.nofap || { start: "", log: {} }
+        );
+        const [habits, setHabits] = useState(
+          data.habits || { schema: [], log: {} }
+        );
+
+        useEffect(() => {
+          setTasks(data.tasks || []);
+          setMoney(data.money || {});
+          setSocial(data.social || {});
+          setNofap(data.nofap || { start: "", log: {} });
+          setHabits(data.habits || { schema: [], log: {} });
+        }, [data]);
+
+        async function push(updates) {
+          await updateDoc(ref, updates);
+        }
+
+        // derived
+        const today = todayStr();
+        const todayTasks = tasks.filter((t) => t.date === today);
+        const moneyToday =
+          (money[today]?.pocket || 0) + (money[today]?.extra || 0);
+        const followersToday = social[today]
+          ? social[today].tiktok +
+            social[today].instagram +
+            social[today].youtube
+          : 0;
+
+        // weekly/monthly sum
+        const moneyRows = useMemo(
+          () =>
+            Object.entries(money)
+              .map(([date, m]) => ({
+                date,
+                pocket: m.pocket || 0,
+                extra: m.extra || 0,
+                total: (m.pocket || 0) + (m.extra || 0),
+              }))
+              .sort((a, b) => a.date.localeCompare(b.date)),
+          [money]
+        );
+        const monthlySum = useMemo(() => {
+          const ym = today.slice(0, 7);
+          return moneyRows
+            .filter((r) => r.date.startsWith(ym))
+            .reduce((s, r) => s + r.total, 0);
+        }, [moneyRows, today]);
+        const weekSum = useMemo(() => {
+          // ISO week
+          function isoWeekOf(isoDate) {
+            const dt = new Date(isoDate + "T00:00:00");
+            const t = new Date(dt);
+            t.setDate(dt.getDate() + 3 - ((dt.getDay() + 6) % 7));
+            const w1 = new Date(t.getFullYear(), 0, 4);
+            return (
+              1 +
+              Math.round(
+                ((t - w1) / 86400000 - 3 + ((w1.getDay() + 6) % 7)) / 7
+              )
+            );
+          }
+          const d = new Date();
+          const y = d.getFullYear();
+          const w = isoWeekOf(today);
+          return moneyRows
+            .filter((r) => {
+              const dt = new Date(r.date + "T00:00:00");
+              return dt.getFullYear() === y && isoWeekOf(r.date) === w;
+            })
+            .reduce((s, r) => s + r.total, 0);
+        }, [moneyRows, today]);
+
+        const socialData = useMemo(() => {
+          const dates = Object.keys(social).sort();
+          return dates.map((d) => ({
+            date: d,
+            TikTok: social[d]?.tiktok || 0,
+            Instagram: social[d]?.instagram || 0,
+            YouTube: social[d]?.youtube || 0,
+          }));
+        }, [social]);
+
+        const nofapDays = useMemo(
+          () =>
+            nofap.start
+              ? Math.max(
+                  1,
+                  Math.floor(
+                    (new Date() - new Date(nofap.start)) / (1000 * 60 * 60 * 24)
+                  ) + 1
+                )
+              : 0,
+          [nofap.start]
+        );
+
+        // Habit helpers
+        function setHabitValue(key, value) {
+          const log = { ...habits.log };
+          const day = { ...(log[today] || {}) };
+          day[key] = number(value);
+          log[today] = day;
+          setHabits({ ...habits, log });
+          push({ habits: { ...habits, log } });
+        }
+
+        // PDF Export
+        async function exportPDF() {
+          const { jsPDF } = window.jspdf;
+          const doc = new jsPDF();
+          const line = (y, txt) => {
+            doc.text(txt, 14, y);
+          };
+          let y = 16;
+          doc.setFontSize(16);
+          line(y, "Personal Growth – Laporan");
+          y += 8;
+          doc.setFontSize(11);
+          line(y, `Tanggal: ${today}`);
+          y += 6;
+          line(
+            y,
+            `Tasks selesai: ${todayTasks.filter((t) => t.done).length}/${
+              todayTasks.length
+            }`
+          );
+          y += 6;
+          line(y, `Uang hari ini: ${moneyToday}`);
+          y += 6;
+          line(y, `Total Minggu ini: ${weekSum}`);
+          y += 6;
+          line(y, `Total Bulan ${today.slice(0, 7)}: ${monthlySum}`);
+          y += 6;
+          line(y, `Followers today (sum): ${followersToday}`);
+          y += 6;
+          line(
+            y,
+            nofap.start
+              ? `No Fap – hari ke-${nofapDays} (start ${nofap.start})`
+              : "No Fap – belum mulai"
+          );
+          y += 10;
+
+          line(y, "Habits today:");
+          y += 6;
+          habits.schema.forEach((hb) => {
+            const v = habits.log?.[today]?.[hb.key] ?? 0;
+            line(y, `• ${hb.label}: ${v} ${hb.unit}`);
+            y += 6;
+          });
+
+          doc.save(`PGD-${today}.pdf`);
+        }
+
+        // UI helpers
+        const NavBtn = ({ label, active, onClick }) =>
+          h(
+            "button",
+            {
+              onClick,
+              className:
+                "px-3 py-2 rounded-xl border text-sm " +
+                (active
+                  ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+                  : "border-slate-300 dark:border-slate-700"),
+            },
+            label
+          );
+
+        const [tab, setTab] = useState("home");
+
+        return h(
+          "div",
+          h(
+            "header",
+            {
+              className:
+                "sticky top-0 z-10 backdrop-blur bg-white/70 dark:bg-slate-900/70 border-b border-slate-200 dark:border-slate-800",
+            },
+            h(
+              "div",
+              {
+                className:
+                  "container-max mx-auto px-4 py-3 flex items-center justify-between",
+              },
+              h("div", { className: "font-bold" }, "Personal Growth Dashboard"),
+              h(
+                "div",
+                { className: "flex items-center gap-2" },
+                h(NavBtn, {
+                  label: "Home",
+                  active: tab === "home",
+                  onClick: () => setTab("home"),
+                }),
+                h(NavBtn, {
+                  label: "Daily",
+                  active: tab === "daily",
+                  onClick: () => setTab("daily"),
+                }),
+                h(NavBtn, {
+                  label: "Finance",
+                  active: tab === "finance",
+                  onClick: () => setTab("finance"),
+                }),
+                h(NavBtn, {
+                  label: "Social",
+                  active: tab === "social",
+                  onClick: () => setTab("social"),
+                }),
+                h(NavBtn, {
+                  label: "NoFap",
+                  active: tab === "nofap",
+                  onClick: () => setTab("nofap"),
+                }),
+                h(NavBtn, {
+                  label: "Habits",
+                  active: tab === "habits",
+                  onClick: () => setTab("habits"),
+                }),
+                h(NavBtn, {
+                  label: "Reports",
+                  active: tab === "reports",
+                  onClick: () => setTab("reports"),
+                }),
+                h(
+                  "button",
+                  {
+                    onClick: () => setDark((d) => !d),
+                    className:
+                      "px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 text-sm",
+                  },
+                  "Light/Dark"
+                )
+              )
+            )
+          ),
+          h(
+            "main",
+            { className: "container-max mx-auto p-4 space-y-4" },
+            tab === "home" &&
+              h(HomeCard, { tasks, moneyToday, followersToday, nofapDays }),
+            tab === "daily" &&
+              h(DailyTab, {
+                tasks,
+                setTasks: (t) => {
+                  setTasks(t);
+                  push({ tasks: t });
+                },
+              }),
+            tab === "finance" &&
+              h(FinanceTab, {
+                money,
+                setMoney: (m) => {
+                  setMoney(m);
+                  push({ money: m });
+                },
+              }),
+            tab === "social" &&
+              h(SocialTab, {
+                social,
+                setSocial: (s) => {
+                  setSocial(s);
+                  push({ social: s });
+                },
+              }),
+            tab === "nofap" &&
+              h(NoFapTab, {
+                nofap,
+                setNoFap: (n) => {
+                  setNofap(n);
+                  push({ nofap: n });
+                },
+              }),
+            tab === "habits" &&
+              h(HabitsTab, {
+                habits,
+                setHabits: (hval) => {
+                  setHabits(hval);
+                  push({ habits: hval });
+                },
+              }),
+            tab === "reports" &&
+              h(ReportsTab, { exportPDF, monthlySum, weekSum })
+          ),
+          h(
+            "footer",
+            {
+              className:
+                "container-max mx-auto p-4 text-center text-xs opacity-70",
+            },
+            "Built as PWA – data sync via Firebase. Input manual. UI bilingual ID–EN."
+          )
+        );
+      }
+
+      // Components
+      function HomeCard({ tasks, moneyToday, followersToday, nofapDays }) {
+        const today = todayStr();
+        const tToday = tasks.filter((t) => t.date === today);
+        return h(
+          "div",
+          { className: "grid grid-cols-1 md:grid-cols-3 gap-4" },
+          h(
+            Card,
+            h(
+              "div",
+              { className: "text-sm opacity-70" },
+              "Tasks – Kegiatan Hari Ini"
+            ),
+            h(
+              "div",
+              { className: "text-2xl font-semibold" },
+              `${tToday.filter((t) => t.done).length}/${tToday.length}`
+            )
+          ),
+          h(
+            Card,
+            h(
+              "div",
+              { className: "text-sm opacity-70" },
+              "Uang Hari Ini – Today"
+            ),
+            h("div", { className: "text-2xl font-semibold" }, moneyToday)
+          ),
+          h(
+            Card,
+            h(
+              "div",
+              { className: "text-sm opacity-70" },
+              "Followers/Subscribers Today"
+            ),
+            h("div", { className: "text-2xl font-semibold" }, followersToday)
+          ),
+          h(
+            Card,
+            h("div", { className: "text-sm opacity-70" }, "No Fap Streak"),
+            h("div", { className: "text-2xl font-semibold" }, nofapDays || "-")
+          )
+        );
+      }
+
+      function DailyTab({ tasks, setTasks }) {
+        const [text, setText] = useState("");
+        function add() {
+          if (!text.trim()) return;
+          const t = {
+            id: crypto.randomUUID(),
+            text: text.trim(),
+            date: todayStr(),
+            important: false,
+            done: false,
+          };
+          setTasks([t, ...tasks]);
+          setText("");
+        }
+        function toggle(id, k) {
+          setTasks(tasks.map((t) => (t.id === id ? { ...t, [k]: !t[k] } : t)));
+        }
+        function del(id) {
+          setTasks(tasks.filter((t) => t.id !== id));
+        }
+        return h(
+          Card,
+          h(
+            "div",
+            { className: "flex items-center gap-2 mb-3" },
+            h("input", {
+              className:
+                "flex-1 px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+              placeholder: "Tambah tugas – Add task",
+              value: text,
+              onChange: (e) => setText(e.target.value),
+            }),
+            h(Button, { onClick: add }, "+ Add")
+          ),
+          h(
+            "ul",
+            { className: "space-y-2 max-h-80 overflow-auto pr-1" },
+            tasks.map((t) =>
+              h(
+                "li",
+                {
+                  key: t.id,
+                  className:
+                    "flex items-center gap-2 p-2 rounded-xl border " +
+                    (t.important
+                      ? "border-amber-400"
+                      : "border-slate-200 dark:border-slate-800"),
+                },
+                h("input", {
+                  type: "checkbox",
+                  checked: t.done,
+                  onChange: () => toggle(t.id, "done"),
+                  className: "w-4 h-4",
+                }),
+                h(
+                  "span",
+                  {
+                    className:
+                      "flex-1 " + (t.done ? "line-through opacity-60" : ""),
+                  },
+                  `[${t.date}] ${t.text}`
+                ),
+                h(
+                  Button,
+                  {
+                    variant: "ghost",
+                    onClick: () => toggle(t.id, "important"),
+                  },
+                  t.important ? "Penting" : "Mark"
+                ),
+                h(
+                  "button",
+                  {
+                    onClick: () => del(t.id),
+                    className: "opacity-70 hover:opacity-100 text-sm underline",
+                  },
+                  "Delete"
+                )
+              )
+            )
+          )
+        );
+      }
+
+      function FinanceTab({ money, setMoney }) {
+        const [pocket, setPocket] = useState("");
+        const [extra, setExtra] = useState("");
+        function save() {
+          const d = todayStr();
+          const entry = { pocket: number(pocket), extra: number(extra) };
+          const nm = { ...money, [d]: entry };
+          setMoney(nm);
+          setPocket("");
+          setExtra("");
+        }
+
+        const rows = Object.entries(money)
+          .map(([date, m]) => ({
+            date,
+            pocket: m.pocket || 0,
+            extra: m.extra || 0,
+            total: (m.pocket || 0) + (m.extra || 0),
+          }))
+          .sort((a, b) => a.date.localeCompare(b.date));
+
+        return h(
+          "div",
+          { className: "space-y-4" },
+          h(
+            Card,
+            h(
+              "div",
+              { className: "grid grid-cols-2 gap-2 mb-3" },
+              h("input", {
+                inputMode: "decimal",
+                className:
+                  "px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                placeholder: "Uang jajan – pocket",
+                value: pocket,
+                onChange: (e) => setPocket(e.target.value),
+              }),
+              h("input", {
+                inputMode: "decimal",
+                className:
+                  "px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                placeholder: "Pendapatan tambahan – extra",
+                value: extra,
+                onChange: (e) => setExtra(e.target.value),
+              })
+            ),
+            h(Button, { onClick: save }, "Save Today")
+          ),
+          h(
+            Card,
+            h(
+              "div",
+              { className: "h-64" },
+              h(
+                ResponsiveContainer,
+                { width: "100%", height: "100%" },
+                h(
+                  LineChart,
+                  { data: rows },
+                  h(CartesianGrid, { strokeDasharray: "3 3" }),
+                  h(XAxis, { dataKey: "date" }),
+                  h(YAxis, {}),
+                  h(Tooltip, {}),
+                  h(Legend, {}),
+                  h(Line, {
+                    type: "monotone",
+                    dataKey: "pocket",
+                    strokeWidth: 2,
+                    dot: false,
+                  }),
+                  h(Line, {
+                    type: "monotone",
+                    dataKey: "extra",
+                    strokeWidth: 2,
+                    dot: false,
+                  }),
+                  h(Line, {
+                    type: "monotone",
+                    dataKey: "total",
+                    strokeWidth: 2,
+                    dot: false,
+                  })
+                )
+              )
+            )
+          )
+        );
+      }
+
+      function SocialTab({ social, setSocial }) {
+        const [tiktok, setTiktok] = useState("");
+        const [instagram, setInstagram] = useState("");
+        const [youtube, setYouTube] = useState("");
+        function save() {
+          const d = todayStr();
+          const ns = {
+            ...social,
+            [d]: {
+              tiktok: number(tiktok),
+              instagram: number(instagram),
+              youtube: number(youtube),
+            },
+          };
+          setSocial(ns);
+          setTiktok("");
+          setInstagram("");
+          setYouTube("");
+        }
+        const data = Object.keys(social)
+          .sort()
+          .map((d) => ({
+            date: d,
+            TikTok: social[d]?.tiktok || 0,
+            Instagram: social[d]?.instagram || 0,
+            YouTube: social[d]?.youtube || 0,
+          }));
+        return h(
+          "div",
+          { className: "space-y-4" },
+          h(
+            Card,
+            h(
+              "div",
+              { className: "grid grid-cols-4 gap-2 mb-3" },
+              h("input", {
+                inputMode: "numeric",
+                className:
+                  "px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                placeholder: "TikTok today",
+                value: tiktok,
+                onChange: (e) => setTiktok(e.target.value),
+              }),
+              h("input", {
+                inputMode: "numeric",
+                className:
+                  "px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                placeholder: "Instagram today",
+                value: instagram,
+                onChange: (e) => setInstagram(e.target.value),
+              }),
+              h("input", {
+                inputMode: "numeric",
+                className:
+                  "px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                placeholder: "YouTube today",
+                value: youtube,
+                onChange: (e) => setYouTube(e.target.value),
+              }),
+              h(Button, { onClick: save }, "Save")
+            )
+          ),
+          h(
+            Card,
+            h(
+              "div",
+              { className: "h-64" },
+              h(
+                ResponsiveContainer,
+                { width: "100%", height: "100%" },
+                h(
+                  LineChart,
+                  { data },
+                  h(CartesianGrid, { strokeDasharray: "3 3" }),
+                  h(XAxis, { dataKey: "date" }),
+                  h(YAxis, {}),
+                  h(Tooltip, {}),
+                  h(Legend, {}),
+                  h(Line, {
+                    type: "monotone",
+                    dataKey: "TikTok",
+                    strokeWidth: 2,
+                    dot: false,
+                  }),
+                  h(Line, {
+                    type: "monotone",
+                    dataKey: "Instagram",
+                    strokeWidth: 2,
+                    dot: false,
+                  }),
+                  h(Line, {
+                    type: "monotone",
+                    dataKey: "YouTube",
+                    strokeWidth: 2,
+                    dot: false,
+                  })
+                )
+              )
+            )
+          )
+        );
+      }
+
+      function NoFapTab({ nofap, setNoFap }) {
+        const [start, setStart] = useState(nofap.start || "");
+        const [log, setLog] = useState(nofap.log || {});
+        useEffect(() => {
+          setStart(nofap.start || "");
+          setLog(nofap.log || {});
+        }, [nofap]);
+        const days = start
+          ? Math.max(
+              1,
+              Math.floor(
+                (new Date() - new Date(start)) / (1000 * 60 * 60 * 24)
+              ) + 1
+            )
+          : 0;
+        function saveStart() {
+          setNoFap({ start, log });
+        }
+        function checkIn() {
+          const d = todayStr();
+          const nl = { ...log, [d]: true };
+          setLog(nl);
+          setNoFap({ start, log: nl });
+        }
+        function reset() {
+          setStart("");
+          setLog({});
+          setNoFap({ start: "", log: {} });
+        }
+        return h(
+          Card,
+          start
+            ? h(
+                "div",
+                { className: "space-y-3" },
+                h("div", null, `Hari ke- ${days} sejak ${start}`),
+                h(Button, { onClick: checkIn }, "Check-in Today"),
+                h(Button, { variant: "outline", onClick: reset }, "Reset")
+              )
+            : h(
+                "div",
+                { className: "space-y-3" },
+                h(
+                  "label",
+                  { className: "text-sm opacity-80" },
+                  "Tanggal mulai – Start date"
+                ),
+                h("input", {
+                  type: "date",
+                  value: start,
+                  onChange: (e) => setStart(e.target.value),
+                  className:
+                    "px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                }),
+                h(Button, { onClick: saveStart }, "Save Start")
+              )
+        );
+      }
+
+      function HabitsTab({ habits, setHabits }) {
+        const [schema, setSchema] = useState(habits.schema || []);
+        const [log, setLog] = useState(habits.log || {});
+        useEffect(() => {
+          setSchema(habits.schema || []);
+          setLog(habits.log || {});
+        }, [habits]);
+        const today = todayStr();
+        function addHabit() {
+          const key = "habit" + (schema.length + 1);
+          const nh = { key, label: "Custom", unit: "count", weeklyTarget: 7 };
+          const sc = [...schema, nh];
+          setSchema(sc);
+          setHabits({ schema: sc, log });
+        }
+        function setField(i, field, val) {
+          const sc = [...schema];
+          sc[i] = {
+            ...sc[i],
+            [field]: field === "weeklyTarget" ? number(val) : val,
+          };
+          setSchema(sc);
+          setHabits({ schema: sc, log });
+        }
+        function setValue(key, val) {
+          const l = { ...log };
+          const day = { ...(l[today] || {}) };
+          day[key] = number(val);
+          l[today] = day;
+          setLog(l);
+          setHabits({ schema, log: l });
+        }
+
+        return h(
+          "div",
+          { className: "space-y-4" },
+          h(
+            Card,
+            h(
+              "div",
+              { className: "flex items-center justify-between mb-2" },
+              h(
+                "div",
+                { className: "font-semibold" },
+                "Habits – Tracker Mingguan"
+              ),
+              h(Button, { onClick: addHabit }, "+ Habit")
+            ),
+            h(
+              "div",
+              { className: "space-y-3" },
+              schema.map((hb, i) =>
+                h(
+                  "div",
+                  {
+                    key: hb.key,
+                    className: "grid grid-cols-5 gap-2 items-center",
+                  },
+                  h("input", {
+                    className:
+                      "px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent col-span-2",
+                    value: hb.label,
+                    onChange: (e) => setField(i, "label", e.target.value),
+                  }),
+                  h("input", {
+                    className:
+                      "px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                    value: hb.unit,
+                    onChange: (e) => setField(i, "unit", e.target.value),
+                  }),
+                  h("input", {
+                    inputMode: "numeric",
+                    className:
+                      "px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                    value: hb.weeklyTarget,
+                    onChange: (e) =>
+                      setField(i, "weeklyTarget", e.target.value),
+                  }),
+                  h("input", {
+                    inputMode: "decimal",
+                    placeholder: "Today value",
+                    className:
+                      "px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent",
+                    value: log?.[today]?.[hb.key] || "",
+                    onChange: (e) => setValue(hb.key, e.target.value),
+                  })
+                )
+              )
+            )
+          )
+        );
+      }
+
+      function ReportsTab({ exportPDF, monthlySum, weekSum }) {
+        return h(
+          Card,
+          h(
+            "div",
+            { className: "grid grid-cols-1 md:grid-cols-3 gap-3 mb-3 text-sm" },
+            h(Stat, { label: "Total Minggu ini", value: weekSum }),
+            h(Stat, { label: "Total Bulan ini", value: monthlySum }),
+            h(Stat, { label: "Export", value: "PDF only" })
+          ),
+          h(Button, { onClick: exportPDF }, "Export PDF – Laporan Harian")
+        );
+      }
+
+      // UI primitives
+      function Card() {
+        return h(
+          "div",
+          {
+            className:
+              "rounded-2xl p-4 shadow-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800",
+          },
+          ...arguments
+        );
+      }
+      function Button({ onClick, children, variant }) {
+        const base = "px-3 py-2 rounded-xl text-sm";
+        const styles =
+          variant === "outline"
+            ? "border border-slate-300 dark:border-slate-700"
+            : "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900";
+        return h(
+          "button",
+          { onClick, className: base + " " + styles },
+          children
+        );
+      }
+      function Stat({ label, value }) {
+        return h(
+          "div",
+          {
+            className:
+              "p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700",
+          },
+          h("div", { className: "opacity-70 text-xs" }, label),
+          h("div", { className: "text-xl font-semibold" }, String(value))
+        );
+      }
+
+      // tiny h helper to write JSX‑less
+      function h(type) {
+        const props =
+          typeof arguments[1] === "object" &&
+          !Array.isArray(arguments[1]) &&
+          arguments[1] &&
+          arguments[1].$$typeof === undefined
+            ? arguments[1]
+            : {};
+        const children = Array.prototype.slice.call(
+          arguments,
+          props === arguments[1] ? 2 : 1
+        );
+        return React.createElement(type, props, ...children);
+      }
+
+      // Mount
+      ReactDOM.createRoot(document.getElementById("root")).render(
+        React.createElement(App)
+      );
+    </script>
+  </body>
+</html>
